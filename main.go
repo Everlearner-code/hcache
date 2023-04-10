@@ -23,13 +23,13 @@ package main
  */
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"hcache/pkg/utils"
 	"log"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -130,7 +130,7 @@ func top(top int) {
 
 	for _, process := range results {
 		pcstat.SwitchMountNs(process.Pid())
-		maps := getPidMaps(process.Pid())
+		maps := getPidLds(process.Pid())
 		files = append(files, maps...)
 	}
 
@@ -139,6 +139,7 @@ func top(top int) {
 	stats := getStatsFromFiles(files)
 
 	sort.Sort(PcStatusList(stats))
+	// TODO 修正切片长度小于 top 的时候的报错
 	topStats := stats[:top]
 	formatStats(topStats)
 }
@@ -154,7 +155,7 @@ func main() {
 	files := flag.Args()
 	if pidFlag != 0 {
 		pcstat.SwitchMountNs(pidFlag)
-		maps := getPidMaps(pidFlag)
+		maps := getPidLds(pidFlag)
 		files = append(files, maps...)
 	}
 
@@ -171,31 +172,48 @@ func main() {
 	formatStats(stats)
 }
 
-func getPidMaps(pid int) []string {
-	fname := fmt.Sprintf("/proc/%d/maps", pid)
-
-	f, err := os.Open(fname)
-	if err != nil {
-		log.Fatalf("could not open '%s' for read: %v", fname, err)
+func getPidLds(pid int) []string {
+	// ignore the process of hcache itself
+	if pid == os.Getpid() {
+		return []string{}
 	}
-	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
+	dirname := fmt.Sprintf("/proc/%d/fd", pid)
+	entries, err := os.ReadDir(dirname)
+	if err != nil {
+		if !strings.Contains(err.Error(), "no such file or directory") {
+			log.Fatalf("could not open dir '%s': %v", dirname, err)
+		}
+		log.Printf("skipping %s: %v", dirname, err)
+		return []string{}
+	}
 
 	// use a map to help avoid duplicates
 	maps := make(map[string]bool)
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		parts := strings.Fields(line)
-		if len(parts) == 6 && strings.HasPrefix(parts[5], "/") {
-			// found something that looks like a file
-			maps[parts[5]] = true
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			symlink := fmt.Sprintf("/proc/%d/fd/%s", pid, entry.Name())
+			fi, err := os.Lstat(symlink)
+			if err != nil {
+				log.Printf("could not open '%s' for read: %v", symlink, err)
+				continue
+			}
+			// judge whether the file is a symlink, here, the result is true if the file is a symlink
+			if fi.Mode()&os.ModeSymlink != 0 {
+				target, err := filepath.EvalSymlinks(symlink)
+				if err != nil {
+					// ignore file not found error because this is quite common
+					if !strings.Contains(err.Error(), "no such file or directory") {
+						log.Printf("could not inspect symlink '%s': %v", symlink, err)
+					}
+					continue
+				}
+				if strings.HasPrefix(target, "/") && !strings.HasPrefix(target, "/dev") && !strings.HasPrefix(target, "/proc") {
+					maps[target] = true
+				}
+			}
 		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		log.Fatalf("reading '%s' failed: %s", fname, err)
 	}
 
 	// convert back to a list

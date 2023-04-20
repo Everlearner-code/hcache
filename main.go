@@ -139,8 +139,14 @@ func top(top int) {
 	stats := getStatsFromFiles(files)
 
 	sort.Sort(PcStatusList(stats))
-	// TODO 修正切片长度小于 top 的时候的报错
-	topStats := stats[:top]
+
+	var topStats PcStatusList
+	if top < len(stats) {
+		topStats = stats[:top]
+	} else {
+		topStats = stats[:]
+	}
+
 	formatStats(topStats)
 }
 
